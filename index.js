@@ -5,6 +5,7 @@ const { marked } = require('marked');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const sharp = require('sharp');
 
 // 样式模板（添加中文字体支持）
 const styles = {
@@ -356,6 +357,16 @@ async function convertDirectory(dirPath, outputDir, options) {
       const fullHtml = generateHtml(html, options);
 
       await renderToPngWithBrowser(fullHtml, outputPath, options, browser);
+
+      // 处理分割模式
+      if (options.split && options.format !== 'pdf') {
+        await splitImage(outputPath, outputPath, options);
+
+        // 如果不保留原图，删除它
+        if (!options.keepOriginal) {
+          fs.unlinkSync(outputPath);
+        }
+      }
     }
     console.log(`\nSuccessfully converted ${mdFiles.length} file(s) to: ${outputDir}`);
   } finally {
@@ -398,6 +409,49 @@ async function renderToPngWithBrowser(html, outputPath, options, browser) {
   }
 }
 
+// 分割图片为多张
+async function splitImage(inputPath, outputPattern, options) {
+  const metadata = await sharp(inputPath).metadata();
+
+  const fullHeight = metadata.height;
+  const width = metadata.width;
+  const splitHeight = parseInt(options.splitHeight, 10);
+
+  if (fullHeight <= splitHeight) {
+    // 图片高度小于等于分割高度，不需要分割
+    console.log(`Image height (${fullHeight}px) is less than split height (${splitHeight}px), no splitting needed.`);
+    return [inputPath];
+  }
+
+  const numParts = Math.ceil(fullHeight / splitHeight);
+  const outputPaths = [];
+
+  console.log(`Splitting image (${width}x${fullHeight}) into ${numParts} parts (${splitHeight}px each)...`);
+
+  for (let i = 0; i < numParts; i++) {
+    const top = i * splitHeight;
+    const height = Math.min(splitHeight, fullHeight - top);
+
+    // 生成输出文件名
+    const outputPath = outputPattern.replace(/\.(png|jpg|jpeg)$/i, `-${i + 1}.$1`);
+
+    // 每次重新创建 sharp 实例并使用 extract
+    await sharp(inputPath)
+      .extract({
+        left: 0,
+        top: top,
+        width: width,
+        height: height
+      })
+      .toFile(outputPath);
+
+    outputPaths.push(outputPath);
+    console.log(`  Created: ${outputPath}`);
+  }
+
+  return outputPaths;
+}
+
 // 主入口函数
 async function main() {
   program
@@ -412,6 +466,10 @@ async function main() {
     .option('-f, --format <format>', 'Output format (png/jpeg/pdf)', 'png')
     .option('-d, --dir <directory>', 'Convert all markdown files in directory')
     .option('--stdin', 'Read markdown from stdin')
+    .option('-S, --split', 'Split output into multiple images (for social media like 小红书)')
+    .option('--split-height <number>', 'Height of each split image in pixels', '1600')
+    .option('--split-width <number>', 'Width of each split image in pixels', '1080')
+    .option('--keep-original', 'Keep original full-page image after splitting')
     .helpOption('-h, --help', 'Show this help message')
     .parse();
 
@@ -447,6 +505,21 @@ async function main() {
   if (isNaN(options.padding) || options.padding < 0) {
     console.error('Error: Padding must be a number >= 0');
     process.exit(1);
+  }
+
+  // 处理分割模式选项
+  if (options.split) {
+    options.splitHeight = parseInt(options.splitHeight, 10);
+    options.splitWidth = parseInt(options.splitWidth, 10);
+
+    if (isNaN(options.splitHeight) || options.splitHeight < 100) {
+      console.error('Error: Split height must be a number >= 100');
+      process.exit(1);
+    }
+    if (isNaN(options.splitWidth) || options.splitWidth < 100) {
+      console.error('Error: Split width must be a number >= 100');
+      process.exit(1);
+    }
   }
 
   // 处理目录转换模式
@@ -499,6 +572,17 @@ async function main() {
   const fullHtml = generateHtml(html, options);
 
   await renderToPng(fullHtml, options.output, options);
+
+  // 处理分割模式
+  if (options.split && options.format !== 'pdf') {
+    await splitImage(options.output, options.output, options);
+
+    // 如果不保留原图，删除它
+    if (!options.keepOriginal) {
+      fs.unlinkSync(options.output);
+      console.log(`Removed original file: ${options.output}`);
+    }
+  }
 }
 
 // 运行主程序
